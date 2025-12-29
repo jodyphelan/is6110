@@ -78,15 +78,16 @@ def get_annotation(gff: list, var: pysam.VariantRecord, me_name:str):
 
 
 
-def get_is_overlapping_reads(bam_file: str, seq: str, region: str):
+def get_is_overlapping_reads(bam_file: str, seq: str, region: str = None, cores: int = 1) -> set:
     """
     Get the number of reads overlapping with the specified region in the BAM file.
     """
     read_names = set()
     with tempfile.TemporaryDirectory() as tmpdirname:
         logging.debug(f"Temporary directory created: {tmpdirname}")
-        
-        run_cmd(f'samtools view -b {bam_file} {region} | samtools fastq | bwa mem {seq} - | samtools sort -o {tmpdirname}/temp.bam -')
+        if region is None:
+            region = ''
+        run_cmd(f'samtools view -b {bam_file} {region} | samtools fastq | bwa mem -t {cores} {seq} - | samtools sort -o {tmpdirname}/temp.bam -')
         run_cmd(f'samtools index {tmpdirname}/temp.bam')
         bam = pysam.AlignmentFile(f'{tmpdirname}/temp.bam', "rb")
         for read in bam:
@@ -250,12 +251,15 @@ def cli():
         "-d", "--min_depth", type=int, default=10, help="Minimum depth for positions to be considered."
     )
     parser.add_argument(
-        "-v", "--verbose", action="store_true", help="Enable verbose logging."
+        "-c", "--cpus", type=int, default=1, help="Number of CPUs to use."
+    )
+    parser.add_argument(
+        "-v", "--debug", action="store_true", help="Enable verbose logging."
     )
 
     args = parser.parse_args()
 
-    if args.verbose:
+    if args.debug:
         logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
     else:
         # Set to WARNING to suppress debug messages
@@ -279,15 +283,43 @@ def cli():
         for l in open(args.targets_file):
             row = l.strip().split('\t')
             regions.append(row[0]+":"+row[1]+"-"+row[2])
-    else:
+    elif args.target:
         regions = [args.target]
+    else:
+        regions = []
+
 
     insertion_positions = set()
-    for region in tqdm(regions):
-        is_overlapping_read = get_is_overlapping_reads(args.bam, args.seq, region)
-        positions = get_most_common_positions(args.bam, region, is_overlapping_read,min_depth=args.min_depth)
+    print(regions)
+    if len(regions)>0:
+        for region in tqdm(regions):
+            is_overlapping_read = get_is_overlapping_reads(args.bam, args.seq, region)
+            positions = get_most_common_positions(args.bam, region, is_overlapping_read,min_depth=args.min_depth)
+            logging.debug(f"Positions: {positions}")
+
+            if len(positions)>0:
+                positions = sorted(positions)
+                start = positions[0]
+                end = positions[1] if len(positions)==2 else None
+                
+                AD = get_AD(args.bam, ref_seqname, start, end)
+                insertion_positions.add((ref_seqname,start,AD))
+    else:
+        is_overlapping_read = get_is_overlapping_reads(args.bam, args.seq, cores=args.cpus)
+        positions = get_most_common_positions(args.bam, f'{ref_seqname}:1-{ref.get_reference_length(ref_seqname)}', is_overlapping_read,min_depth=args.min_depth)
         logging.debug(f"Positions: {positions}")
 
+        def get_clustered_positions(positions):
+            clustered = set()
+            for i, pos in enumerate(positions):
+                for j, other_pos in enumerate(positions):
+                    if i != j and abs(pos - other_pos) <= 3:
+                        clustered.add(pos)
+                        break
+            return sorted(list(clustered))
+
+        clustered_positions = get_clustered_positions(positions)
+        logging.debug(f"Clustered Positions: {clustered_positions}")
         if len(positions)>0:
             positions = sorted(positions)
             start = positions[0]
@@ -295,7 +327,6 @@ def cli():
             
             AD = get_AD(args.bam, ref_seqname, start, end)
             insertion_positions.add((ref_seqname,start,AD))
-
     insertion_positions = sorted(insertion_positions, key=lambda x: x[1])
 
     write_vcf(insertion_positions, args.out, ref, sample_name, is_name, gff_file=args.gff)
