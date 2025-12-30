@@ -2,7 +2,7 @@
 Code to perform IS6110 variant calling
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 import argparse
@@ -300,7 +300,10 @@ def cli():
         "-c", "--cpus", type=int, default=1, help="Number of CPUs to use."
     )
     parser.add_argument(
-        "-v", "--debug", action="store_true", help="Enable verbose logging."
+        "--debug", action="store_true", help="Enable verbose logging."
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"is6110 version {__version__}"
     )
 
     args = parser.parse_args()
