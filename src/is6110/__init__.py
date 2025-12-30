@@ -8,18 +8,47 @@ __version__ = "0.1.0"
 import argparse
 import pysam
 from collections import Counter
-from subprocess import run
+import subprocess as sp
 from typing import List, Tuple
 import tempfile
 import logging
-from pathogenprofiler import load_gff, run_cmd
+from .gff import load_gff
 import re
 import os
 from tqdm import tqdm
 
+def which(program):
+    def is_exe(fpath):
+        return os.path.isfile(fpath) and os.access(fpath, os.X_OK)
 
+    fpath, _ = os.path.split(program)
+    if fpath:
+        if is_exe(program):
+            return True
+    else:
+        for path in os.environ["PATH"].split(os.pathsep):
+            exe_file = os.path.join(path, program)
+            if is_exe(exe_file):
+                return True
+    return False
 
-
+def run_cmd(cmd: str, desc=None, log: str=None, exit_on_error: bool=True) -> sp.CompletedProcess:
+    if desc:
+        logging.info(desc)
+    processed_cmd = cmd.replace("&&","XX")
+    programs = set([x.strip().split()[0] for x in re.split("[|&;]",processed_cmd.strip()) if x!=""])
+    missing = [p for p in programs if which(p)==False]
+    if len(missing)>0:
+        raise ValueError("Cant find programs: %s\n" % (", ".join(missing)))
+    logging.debug(f"Running command: {cmd}")
+    cmd = "/bin/bash -c set -o pipefail; " + cmd
+    output = open(log,"w") if log else sp.PIPE
+    result = sp.run(cmd,shell=True,stderr=output,stdout=output)
+    if result.returncode != 0:
+        logging.error(result.stderr.decode("utf-8"))
+        if exit_on_error:
+            raise ValueError("Command Failed:\n%s\nstderr:\n%s" % (cmd,result.stderr.decode()))
+    return result
 
 
 
@@ -44,7 +73,7 @@ def get_overlapping_genes(gff, position):
     """
     Get the genes overlapping with a given position.
     """
-    overlapping_genes = [g for g in gff if g.start <= position <= g.end]
+    overlapping_genes = [g for g in gff if g.feature_start <= position <= g.feature_end]
     return overlapping_genes
 
 
@@ -62,6 +91,8 @@ def get_annotation(gff: list, var: pysam.VariantRecord, me_name:str):
     """
     anns = []
     genes = get_overlapping_genes(gff, var.start)
+    print(var)
+    print(genes)
 
     for gene in genes:
         gene_positions = get_gene_position(gene, var.start)
@@ -75,9 +106,6 @@ def get_annotation(gff: list, var: pysam.VariantRecord, me_name:str):
 
 
 
-
-
-
 def get_is_overlapping_reads(bam_file: str, seq: str, region: str = None, cores: int = 1) -> set:
     """
     Get the number of reads overlapping with the specified region in the BAM file.
@@ -86,8 +114,10 @@ def get_is_overlapping_reads(bam_file: str, seq: str, region: str = None, cores:
     with tempfile.TemporaryDirectory() as tmpdirname:
         logging.debug(f"Temporary directory created: {tmpdirname}")
         if region is None:
-            region = ''
-        run_cmd(f'samtools view -b {bam_file} {region} | samtools fastq | bwa mem -t {cores} {seq} - | samtools sort -o {tmpdirname}/temp.bam -')
+            first_part = f'extract-clipped-reads -b {bam_file} '
+        else:
+            first_part = f'samtools view -b {bam_file} {region}'
+        run_cmd(f'{first_part} | samtools fastq | bwa mem -t {cores} {seq} - | samtools sort -o {tmpdirname}/temp.bam -')
         run_cmd(f'samtools index {tmpdirname}/temp.bam')
         bam = pysam.AlignmentFile(f'{tmpdirname}/temp.bam', "rb")
         for read in bam:
@@ -106,18 +136,13 @@ def get_most_common_positions(bam_file: str, region: str, read_names: List[str],
 
     for read in bam.fetch(chrom, start, end):
         if read.query_name in read_names:
-            if read.query_name=='SRR7341643.96458':
-                logging.debug(f"Read name: {read.query_name}")
-                logging.debug(f"Read CIGAR: {read.cigarstring}")
-                logging.debug(f"Read reference start: {read.reference_start}")
-                logging.debug(f"Read reference end: {read.reference_end}")
             if not read.cigarstring:
                 continue
             if 'S' in read.cigarstring:
                 if re.search(r'^[0-9]+S', read.cigarstring):
-                    positions.append(read.reference_start)
+                    positions.append(('L',read.reference_start))
                 elif re.search(r'[0-9]+S$', read.cigarstring):
-                    positions.append(read.reference_end)
+                    positions.append(('R',read.reference_end))
                 else:
                     pass
 
@@ -126,6 +151,7 @@ def get_most_common_positions(bam_file: str, region: str, read_names: List[str],
     position_counts = Counter(positions)
     logging.debug(f"Position counts: {position_counts}")
     positions = [pos for pos, count in position_counts.items() if count >= min_depth]
+
     
     return positions
 
@@ -144,16 +170,17 @@ def get_AD(bam_file: str, chrom: str, start: int, end: int = None):
     logging.debug(f"Fetching reads from {chrom}:{start}-{end}")
     for read in bam.fetch(chrom, start-1, end):
         # if read is soft clipped 
-        if 'H' in read.cigarstring:
+        if read.cigarstring and 'H' in read.cigarstring:
             continue
-        elif 'S' in read.cigarstring:
+        elif read.cigarstring and 'S' in read.cigarstring:
             clipped_reads.append(read)
         else:
             # check if read spans the region
             if read.reference_start <= start and read.reference_end >= end:
                 covering_reads.append(read)
             else:
-                logging.debug(f"Read {read.query_name} does not span the region {chrom}:{start}-{end}")
+                # logging.debug(f"Read {read.query_name} does not span the region {chrom}:{start}-{end}")
+                pass
 
     
 
@@ -196,6 +223,7 @@ def write_vcf(
             vcf_out.header.contigs.add(chrom, chromlen)
         
         for chrom,pos,ad in positions:
+            pos = pos - 1
             ref_seq = ref.fetch(chrom, pos, pos+1)
             record = vcf_out.new_record(
                 contig=chrom,
@@ -203,7 +231,7 @@ def write_vcf(
                 alleles=[ref_seq,f'<INS:ME:{is_name}>'],
                 id='.',
             )
-            record.samples[sample_name]['GT'] = (1, 1)
+            record.samples[sample_name]['GT'] = (1)
             record.samples[sample_name]['AD'] = ad
             if gff_file:
                 record.info['ANN'] = get_annotation(gff, record, is_name)
@@ -218,7 +246,24 @@ def get_sample_name(bam_file: str):
     return sample_name
 
 
+def cli_get_clipped_reads():
+    parser = argparse.ArgumentParser(description="Get clipped reads from a BAM file.")
+    parser.add_argument(
+        "-b", "--bam", type=str, required=True, help="Input BAM file."
+    )
 
+    args = parser.parse_args()
+
+    inbam = pysam.AlignmentFile(args.bam,'rb')
+    # create filehandle to stdout
+    outbam = pysam.AlignmentFile("/dev/stdout", "wb", template=inbam)
+
+    for read in inbam:
+        # check if read is clipped
+        if read.cigarstring and 'S' in read.cigarstring:
+            outbam.write(read)
+    outbam.close()
+    inbam.close()
 
 
 
@@ -244,11 +289,14 @@ def cli():
         "-t", "--target", type=str, required=False, help="Region to search in the format 'chr:start-end'."
     )
     group.add_argument(
-        "-T", "--targets_file", type=str, required=False, help="Bed file with regions to search."
+        "-T", "--targets-file", type=str, required=False, help="Bed file with regions to search."
     )
 
     parser.add_argument(
-        "-d", "--min_depth", type=int, default=10, help="Minimum depth for positions to be considered."
+        "-d", "--min-depth", type=int, default=10, help="Minimum depth for positions to be considered."
+    )
+    parser.add_argument(
+        "--clipping-gap", type=int, default=10, help="Maximum gap between left and right clipped reads."
     )
     parser.add_argument(
         "-c", "--cpus", type=int, default=1, help="Number of CPUs to use."
@@ -290,7 +338,6 @@ def cli():
 
 
     insertion_positions = set()
-    print(regions)
     if len(regions)>0:
         for region in tqdm(regions):
             is_overlapping_read = get_is_overlapping_reads(args.bam, args.seq, region)
@@ -311,22 +358,32 @@ def cli():
 
         def get_clustered_positions(positions):
             clustered = set()
-            for i, pos in enumerate(positions):
-                for j, other_pos in enumerate(positions):
-                    if i != j and abs(pos - other_pos) <= 3:
+            for i, (direction, pos) in enumerate(positions):
+                for j, (other_direction, other_pos) in enumerate(positions):
+                    if (
+                        (i != j and abs(pos - other_pos) <= args.clipping_gap)
+                        and (direction != other_direction)
+                    ):
                         clustered.add(pos)
                         break
-            return sorted(list(clustered))
+            clustered = sorted(list(clustered))
+            coordinates = []
+            while len(clustered) > 0:
+                if len(clustered) == 1:
+                    raise ValueError("Unpaired clipping position found.")
+                start = clustered.pop(0)
+                end = clustered.pop(0)
+                coordinates.append((start, end))
+            return sorted(coordinates)
 
         clustered_positions = get_clustered_positions(positions)
         logging.debug(f"Clustered Positions: {clustered_positions}")
-        if len(positions)>0:
-            positions = sorted(positions)
-            start = positions[0]
-            end = positions[1] if len(positions)==2 else None
-            
-            AD = get_AD(args.bam, ref_seqname, start, end)
-            insertion_positions.add((ref_seqname,start,AD))
+        if len(clustered_positions)>0:
+            for start,end in clustered_positions: 
+                print(start,end)           
+                AD = get_AD(args.bam, ref_seqname, start, end)
+                insertion_positions.add((ref_seqname,start,AD))
     insertion_positions = sorted(insertion_positions, key=lambda x: x[1])
+    print(insertion_positions)
 
     write_vcf(insertion_positions, args.out, ref, sample_name, is_name, gff_file=args.gff)

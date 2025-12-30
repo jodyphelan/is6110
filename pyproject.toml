@@ -9,6 +9,8 @@ readme = "README.md"
 license = {file = "LICENSE"}
 classifiers = ["License :: OSI Approved :: MIT License"]
 dynamic = ["version", "description"]
+dependencies = ["pysam>=0.23", "tqdm"]
 
 [project.scripts]
 is6110 = "is6110:cli"
+extract-clipped-reads = "is6110:cli_get_clipped_reads"
