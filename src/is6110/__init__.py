@@ -91,8 +91,6 @@ def get_annotation(gff: list, var: pysam.VariantRecord, me_name:str):
     """
     anns = []
     genes = get_overlapping_genes(gff, var.start)
-    print(var)
-    print(genes)
 
     for gene in genes:
         gene_positions = get_gene_position(gene, var.start)
@@ -379,11 +377,9 @@ def cli():
         clustered_positions = get_clustered_positions(positions)
         logging.debug(f"Clustered Positions: {clustered_positions}")
         if len(clustered_positions)>0:
-            for start,end in clustered_positions: 
-                print(start,end)           
+            for start,end in clustered_positions:      
                 AD = get_AD(args.bam, ref_seqname, start, end)
                 insertion_positions.add((ref_seqname,start,AD))
     insertion_positions = sorted(insertion_positions, key=lambda x: x[1])
-    print(insertion_positions)
 
     write_vcf(insertion_positions, args.out, ref, sample_name, is_name, gff_file=args.gff)
