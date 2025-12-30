@@ -1,4 +1,4 @@
-# is6110
+# IS6110
 
 This tool is designed to identify the presence of the IS6110 insertion sequence in Mycobacterium tuberculosis genomes. It uses a BAM file as input and outputs a VCF file with the identified regions. 
 
