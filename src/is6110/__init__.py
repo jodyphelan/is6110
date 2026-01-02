@@ -2,10 +2,11 @@
 Code to perform IS6110 variant calling
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 
 import argparse
+import shutil
 import pysam
 from collections import Counter
 import subprocess as sp
@@ -104,24 +105,41 @@ def get_annotation(gff: list, var: pysam.VariantRecord, me_name:str):
 
 
 
-def get_is_overlapping_reads(bam_file: str, seq: str, region: str = None, cores: int = 1) -> set:
+def get_is_overlapping_reads(
+        bam_file: str, 
+        seq: str, 
+        region: str = None, 
+        cores: int = 1, 
+        min_seed_len: int = 11, 
+        min_aln_score: int = 20
+    ) -> dict:
     """
-    Get the number of reads overlapping with the specified region in the BAM file.
+    Get reads overlapping with IS sequences. Returns a dictionary mapping IS names to sets of read names.
     """
-    read_names = set()
+    read_names_by_is = {}
     with tempfile.TemporaryDirectory() as tmpdirname:
         logging.debug(f"Temporary directory created: {tmpdirname}")
+        # copy the seq file to the temp directory
+        # new file name = tmpdirname + IS.fasta
+        new_seq_path = os.path.join(tmpdirname, "IS.fasta")
+        shutil.copy(seq, new_seq_path)
+        seq = new_seq_path
+        # index the seq file
+        run_cmd(f'bwa index {seq}')
         if region is None:
             first_part = f'extract-clipped-reads -b {bam_file} '
         else:
             first_part = f'samtools view -b {bam_file} {region}'
-        run_cmd(f'{first_part} | samtools fastq | bwa mem -t {cores} {seq} - | samtools sort -o {tmpdirname}/temp.bam -')
+        run_cmd(f'{first_part} | samtools fastq | bwa mem -k {min_seed_len} -T {min_aln_score} -t {cores} {seq} - | samtools sort -o {tmpdirname}/temp.bam -')
         run_cmd(f'samtools index {tmpdirname}/temp.bam')
         bam = pysam.AlignmentFile(f'{tmpdirname}/temp.bam', "rb")
         for read in bam:
             if not read.is_unmapped:
-                read_names.add(read.query_name)
-    return read_names
+                is_name = read.reference_name
+                if is_name not in read_names_by_is:
+                    read_names_by_is[is_name] = set()
+                read_names_by_is[is_name].add(read.query_name)
+    return read_names_by_is
 
 def get_most_common_positions(bam_file: str, region: str, read_names: List[str], min_depth: int = 10) -> List[int]:
     bam = pysam.AlignmentFile(bam_file)
@@ -194,10 +212,10 @@ def get_insertion_position(position_counts: Tuple[int,int]):
     return (position_counts[0][0], depth)
 
 def write_vcf(
-    positions: List[Tuple[str,int,Tuple[int,int]]], 
+    positions: List[Tuple[str,int,Tuple[int,int],str]], 
     out_file: str, ref: pysam.FastaFile, 
     sample_name: str, 
-    is_name: str,
+    is_names: List[str],
     gff_file: str = None
 ):
     """
@@ -210,7 +228,8 @@ def write_vcf(
         vcf_out.header.add_meta('FORMAT', items=[('ID', 'AD'), ('Number', 'R'), ('Type', 'Integer'), ('Description', 'Number of reads supporting the reference and insertion alleles')])
 
         vcf_out.header.add_meta('FORMAT', items=[('ID', 'CR'), ('Number', '1'), ('Type', 'Integer'), ('Description', 'Number of clipped reads supporting the insertion')])
-        vcf_out.header.add_meta('ALT', items=[('ID', f'INS:ME:{is_name}'), ('Description', f'Insertion of {is_name} element')])
+        for is_name in is_names:
+            vcf_out.header.add_meta('ALT', items=[('ID', f'INS:ME:{is_name}'), ('Description', f'Insertion of {is_name} element')])
         if gff_file:
             vcf_out.header.add_meta('INFO', items=[('ID', 'ANN'), ('Number', '.'), ('Type', 'String'), ('Description', "Functional annotations: 'Allele | Annotation | Annotation_Impact | Gene_Name | Gene_ID | Feature_Type | Feature_ID | Transcript_BioType | Rank | HGVS.c | HGVS.p | cDNA.pos / cDNA.length | CDS.pos / CDS.length | AA.pos / AA.length | Distance | ERRORS / WARNINGS / INFO' ")])
             gff = load_gff(gff_file)
@@ -222,7 +241,7 @@ def write_vcf(
             chromlen = ref.get_reference_length(chrom)
             vcf_out.header.contigs.add(chrom, chromlen)
         
-        for chrom,pos,ad in positions:
+        for chrom,pos,ad,is_name in positions:
             pos = pos - 1
             ref_seq = ref.fetch(chrom, pos, pos+1)
             record = vcf_out.new_record(
@@ -283,6 +302,9 @@ def cli():
     parser.add_argument(
         "-g", "--gff", type=str, required=False, help="Reference genome file."
     )
+    parser.add_argument(
+        "--is-sequences", type=str, required=False, help="Custom FASTA file containing IS sequences. If not provided, uses the default IS.fasta."
+    )
 
     group = parser.add_mutually_exclusive_group(required=False)
     group.add_argument(
@@ -297,6 +319,12 @@ def cli():
     )
     parser.add_argument(
         "--clipping-gap", type=int, default=10, help="Maximum gap between left and right clipped reads."
+    )
+    parser.add_argument(
+        "--min-seed", type=int, default=10, help="Minimum seed length for BWA MEM (-k)."
+    )
+    parser.add_argument(
+        "--min-score", type=int, default=15, help="Minimum alignment score for BWA MEM (-T)."
     )
     parser.add_argument(
         "-c", "--cpus", type=int, default=1, help="Number of CPUs to use."
@@ -323,9 +351,19 @@ def cli():
 
     #get directory where this file is located
     dir_path = os.path.dirname(os.path.realpath(__file__))
-    args.seq = f'{dir_path}/data/IS6110.fasta'
+    
+    # Use user-provided IS sequences file if specified, otherwise use default
+    if args.is_sequences:
+        args.seq = args.is_sequences
+        logging.info(f"Using custom IS sequences file: {args.seq}")
+    else:
+        args.seq = f'{dir_path}/data/IS.fasta'
+        logging.info(f"Using default IS sequences file: {args.seq}")
+    
     insertion_sequence = pysam.FastaFile(args.seq)
-    is_name = insertion_sequence.references[0]
+    is_names = list(insertion_sequence.references)
+    
+    logging.info(f"Detecting insertions for {len(is_names)} IS elements: {', '.join(is_names)}")
     
     sample_name = get_sample_name(args.bam)
 
@@ -341,24 +379,35 @@ def cli():
 
 
     insertion_positions = set()
+    
+    # Process each IS sequence
     if len(regions)>0:
-        for region in tqdm(regions):
-            is_overlapping_read = get_is_overlapping_reads(args.bam, args.seq, region)
-            positions = get_most_common_positions(args.bam, region, is_overlapping_read,min_depth=args.min_depth)
-            logging.debug(f"Positions: {positions}")
+        for region in tqdm(regions, desc="Scanning regions"):
+            # Map reads once for all IS elements
+            is_overlapping_reads_by_is = get_is_overlapping_reads(args.bam, args.seq, region, min_seed_len=args.min_seed, min_aln_score=args.min_score, cores=args.cpus)
+            
+            # Process each IS element with its specific reads
+            for is_name in is_names:
+                if is_name not in is_overlapping_reads_by_is:
+                    logging.debug(f"No reads mapped to {is_name} in {region}")
+                    continue
+                    
+                is_overlapping_reads = is_overlapping_reads_by_is[is_name]
+                positions = get_most_common_positions(args.bam, region, is_overlapping_reads, min_depth=args.min_depth)
+                logging.debug(f"Positions for {is_name} in {region}: {positions}")
 
-            if len(positions)>0:
-                positions = sorted(positions)
-                start = positions[0]
-                end = positions[1] if len(positions)==2 else None
-                
-                AD = get_AD(args.bam, ref_seqname, start, end)
-                insertion_positions.add((ref_seqname,start,AD))
+                if len(positions)>0:
+                    positions = sorted(positions)
+                    start = positions[0]
+                    end = positions[1] if len(positions)==2 else None
+                    
+                    AD = get_AD(args.bam, ref_seqname, start, end)
+                    insertion_positions.add((ref_seqname,start,AD,is_name))
     else:
-        is_overlapping_read = get_is_overlapping_reads(args.bam, args.seq, cores=args.cpus)
-        positions = get_most_common_positions(args.bam, f'{ref_seqname}:1-{ref.get_reference_length(ref_seqname)}', is_overlapping_read,min_depth=args.min_depth)
-        logging.debug(f"Positions: {positions}")
-
+        # Map reads once for all IS elements (whole genome)
+        logging.info("Mapping reads to IS sequences...")
+        is_overlapping_reads_by_is = get_is_overlapping_reads(args.bam, args.seq,  cores=args.cpus, min_seed_len=args.min_seed, min_aln_score=args.min_score)
+        
         def get_clustered_positions(positions):
             clustered = set()
             for i, (direction, pos) in enumerate(positions):
@@ -378,13 +427,27 @@ def cli():
                 end = clustered.pop(0)
                 coordinates.append((start, end))
             return sorted(coordinates)
+        
+        # Process each IS element with its specific reads
+        for is_name in is_names:
+            logging.info(f"Processing {is_name}...")
+            if is_name not in is_overlapping_reads_by_is:
+                logging.info(f"No reads mapped to {is_name}")
+                continue
+                
+            is_overlapping_reads = is_overlapping_reads_by_is[is_name]
+            logging.info(f"Found {len(is_overlapping_reads)} reads mapping to {is_name}")
+            positions = get_most_common_positions(args.bam, f'{ref_seqname}:1-{ref.get_reference_length(ref_seqname)}', is_overlapping_reads, min_depth=args.min_depth)
+            logging.debug(f"Positions for {is_name}: {positions}")
 
-        clustered_positions = get_clustered_positions(positions)
-        logging.debug(f"Clustered Positions: {clustered_positions}")
-        if len(clustered_positions)>0:
-            for start,end in clustered_positions:      
-                AD = get_AD(args.bam, ref_seqname, start, end)
-                insertion_positions.add((ref_seqname,start,AD))
+            clustered_positions = get_clustered_positions(positions)
+            logging.debug(f"Clustered Positions for {is_name}: {clustered_positions}")
+            if len(clustered_positions)>0:
+                for start,end in clustered_positions:      
+                    AD = get_AD(args.bam, ref_seqname, start, end)
+                    insertion_positions.add((ref_seqname,start,AD,is_name))
+    
     insertion_positions = sorted(insertion_positions, key=lambda x: x[1])
+    logging.info(f"Found {len(insertion_positions)} total insertion(s)")
 
-    write_vcf(insertion_positions, args.out, ref, sample_name, is_name, gff_file=args.gff)
+    write_vcf(insertion_positions, args.out, ref, sample_name, is_names, gff_file=args.gff)
