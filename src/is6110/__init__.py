@@ -174,6 +174,8 @@ def get_AD(bam_file: str, chrom: str, start: int, end: int = None):
             clipped_reads.append(read)
         else:
             # check if read spans the region
+            if read.reference_end is None or read.reference_start is None:
+                continue
             if read.reference_start <= start and read.reference_end >= end:
                 covering_reads.append(read)
             else:
