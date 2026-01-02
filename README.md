@@ -3,7 +3,7 @@
 This tool is designed to identify the presence of insertion sequences (e.g. IS6110) in _Mycobacterium tuberculosis_ genomes. It uses a BAM file as input and outputs a VCF file with the identified regions. 
 
 ## Motivation
-IS6110 is a mobile genetic element that plays a significant role in the evolution and adaptation of Mycobacterium tuberculosis. It has been implecated in drug resistance through disruption of genes such as mmpR5 (https://pubmed.ncbi.nlm.nih.gov/34287057/). Accurate identification of IS6110 insertions is crucial to perform accurate genomic drug resistance prediction. Though there are existing tools to identify IS6110 insertions, I wanted to create a lightweight and easy-to-use tool that could be easily integrated into existing pipelines. Key to this is to:
+IS6110 is a mobile genetic element that plays a significant role in the evolution and adaptation of Mycobacterium tuberculosis. It has been implecated in drug resistance through disruption of genes such as _mmpR5_ (https://pubmed.ncbi.nlm.nih.gov/34287057/). Accurate identification of IS6110 insertions is crucial to perform accurate genomic drug resistance prediction. Though there are existing tools to identify IS6110 insertions, I wanted to create a lightweight and easy-to-use tool that could be easily integrated into existing pipelines. Key to this is to:
 
  1. Take input in BAM format to avoid realigning to the reference genome
  2. Output in VCF format to allow for easy integration into downsteam analysis pipelines.
