@@ -164,9 +164,9 @@ def get_is_overlapping_reads(
         # index the seq file
         run_cmd(f'bwa index {seq}')
         if region is None:
-            first_part = f'extract-clipped-reads -b {bam_file} '
+            first_part = f"samtools view -u -e 'sclen>0' {bam_file} "
         else:
-            first_part = f'samtools view -b {bam_file} {region}'
+            first_part = f"samtools view -u -e 'sclen>0' {bam_file} {region}"
         run_cmd(f'{first_part} | samtools fastq | bwa mem -k {min_seed_len} -T {min_aln_score} -t {cores} {seq} - | samtools sort -o {tmpdirname}/temp.bam -')
         run_cmd(f'samtools index {tmpdirname}/temp.bam')
         bam = pysam.AlignmentFile(f'{tmpdirname}/temp.bam', "rb")
