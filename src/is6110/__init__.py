@@ -18,6 +18,43 @@ import re
 import os
 from tqdm import tqdm
 
+Item = Tuple[str, int]  # ('R' or 'L', position)
+def cluster_positions(items: List[Item], min_distance: int = 5) -> List[List[Item]]:
+    if not items:
+        return []
+
+    items = sorted(items, key=lambda x: x[1])
+
+    clusters: List[List[Item]] = []
+    letters_in_cluster: List[set[str]] = []
+
+    for side, pos in items:
+        if not clusters:
+            clusters.append([(side, pos)])
+            letters_in_cluster.append({side})
+            continue
+
+        last_cluster = clusters[-1]
+        last_letters = letters_in_cluster[-1]
+        last_pos = last_cluster[-1][1]
+
+        within_dist = (pos - last_pos) <= min_distance
+        has_opposite = (('L' in last_letters) if side == 'R' else ('R' in last_letters))
+
+        if within_dist and has_opposite:
+            last_cluster.append((side, pos))
+            last_letters.add(side)
+        else:
+            clusters.append([(side, pos)])
+            letters_in_cluster.append({side})
+
+    coordinates = []
+    for cluster in clusters:
+        if len(cluster) > 1:
+            coordinates.append( (cluster[0][1], cluster[-1][1]) )
+    return sorted(coordinates)
+
+
 def which(program):
     def is_exe(fpath):
         return os.path.isfile(fpath) and os.access(fpath, os.X_OK)
@@ -166,7 +203,10 @@ def get_most_common_positions(bam_file: str, region: str, read_names: List[str],
     # Filter positions based on minimum depth
     position_counts = Counter(positions)
     logging.debug(f"Position counts: {position_counts}")
-    positions = [pos for pos, count in position_counts.items() if count >= min_depth]
+    positions = sorted(
+        [pos for pos, count in position_counts.items() if count >= min_depth]
+        , key=lambda x: x[1]
+    )
 
     
     return positions
@@ -408,6 +448,8 @@ def cli():
         logging.info("Mapping reads to IS sequences...")
         is_overlapping_reads_by_is = get_is_overlapping_reads(args.bam, args.seq,  cores=args.cpus, min_seed_len=args.min_seed, min_aln_score=args.min_score)
         
+
+        
         def get_clustered_positions(positions):
             clustered = set()
             for i, (direction, pos) in enumerate(positions):
@@ -440,7 +482,8 @@ def cli():
             positions = get_most_common_positions(args.bam, f'{ref_seqname}:1-{ref.get_reference_length(ref_seqname)}', is_overlapping_reads, min_depth=args.min_depth)
             logging.debug(f"Positions for {is_name}: {positions}")
 
-            clustered_positions = get_clustered_positions(positions)
+
+            clustered_positions = cluster_positions(positions, min_distance=args.clipping_gap)
             logging.debug(f"Clustered Positions for {is_name}: {clustered_positions}")
             if len(clustered_positions)>0:
                 for start,end in clustered_positions:      
