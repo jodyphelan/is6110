@@ -18,6 +18,11 @@ import re
 import os
 from tqdm import tqdm
 
+import tempfile
+
+tmpdir_obj = tempfile.TemporaryDirectory()
+TMPDIR = tmpdir_obj.name  # path as string
+
 Item = Tuple[str, int]  # ('R' or 'L', position)
 def cluster_positions(items: List[Item], min_distance: int = 5) -> List[List[Item]]:
     if not items:
@@ -74,7 +79,7 @@ def run_cmd(cmd: str, desc=None, log: str=None, exit_on_error: bool=True) -> sp.
     if desc:
         logging.info(desc)
     processed_cmd = cmd.replace("&&","XX")
-    programs = set([x.strip().split()[0] for x in re.split("[|&;]",processed_cmd.strip()) if x!=""])
+    programs = set([x.strip().split()[0] for x in re.split("[|;]",processed_cmd.strip()) if x!=""])
     missing = [p for p in programs if which(p)==False]
     if len(missing)>0:
         raise ValueError("Cant find programs: %s\n" % (", ".join(missing)))
@@ -145,7 +150,6 @@ def get_annotation(gff: list, var: pysam.VariantRecord, me_name:str):
 def get_is_overlapping_reads(
         bam_file: str, 
         seq: str, 
-        region: str = None, 
         cores: int = 1, 
         min_seed_len: int = 11, 
         min_aln_score: int = 20
@@ -154,28 +158,23 @@ def get_is_overlapping_reads(
     Get reads overlapping with IS sequences. Returns a dictionary mapping IS names to sets of read names.
     """
     read_names_by_is = {}
-    with tempfile.TemporaryDirectory() as tmpdirname:
-        logging.debug(f"Temporary directory created: {tmpdirname}")
-        # copy the seq file to the temp directory
-        # new file name = tmpdirname + IS.fasta
-        new_seq_path = os.path.join(tmpdirname, "IS.fasta")
-        shutil.copy(seq, new_seq_path)
-        seq = new_seq_path
-        # index the seq file
-        run_cmd(f'bwa index {seq}')
-        if region is None:
-            first_part = f"samtools view -u -e 'sclen>0' {bam_file} "
-        else:
-            first_part = f"samtools view -u -e 'sclen>0' {bam_file} {region}"
-        run_cmd(f'{first_part} | samtools fastq | bwa mem -k {min_seed_len} -T {min_aln_score} -t {cores} {seq} - | samtools sort -o {tmpdirname}/temp.bam -')
-        run_cmd(f'samtools index {tmpdirname}/temp.bam')
-        bam = pysam.AlignmentFile(f'{tmpdirname}/temp.bam', "rb")
-        for read in bam:
-            if not read.is_unmapped:
-                is_name = read.reference_name
-                if is_name not in read_names_by_is:
-                    read_names_by_is[is_name] = set()
-                read_names_by_is[is_name].add(read.query_name)
+    # copy the seq file to the temp directory
+    # new file name = tmpdirname + IS.fasta
+    new_seq_path = os.path.join(TMPDIR, "IS.fasta")
+    shutil.copy(seq, new_seq_path)
+    seq = new_seq_path
+    # index the seq file
+    run_cmd(f'bwa index {seq}')
+
+    run_cmd(f'samtools fastq {bam_file} | bwa mem -k {min_seed_len} -T {min_aln_score} -t {cores} {seq} - | samtools sort -o {TMPDIR}/temp.bam -')
+    run_cmd(f'samtools index {TMPDIR}/temp.bam')
+    bam = pysam.AlignmentFile(f'{TMPDIR}/temp.bam', "rb")
+    for read in bam:
+        if not read.is_unmapped:
+            is_name = read.reference_name
+            if is_name not in read_names_by_is:
+                read_names_by_is[is_name] = set()
+            read_names_by_is[is_name].add(read.query_name)
     return read_names_by_is
 
 def get_most_common_positions(bam_file: str, region: str, read_names: List[str], min_depth: int = 10) -> List[int]:
@@ -187,7 +186,7 @@ def get_most_common_positions(bam_file: str, region: str, read_names: List[str],
     start = int(start)
     end = int(end)
 
-    for read in bam.fetch(chrom, start, end):
+    for read in bam:
         if read.query_name in read_names:
             if not read.cigarstring:
                 continue
@@ -324,7 +323,20 @@ def cli_get_clipped_reads():
     outbam.close()
     inbam.close()
 
+def create_temp_bam_with_clipped_reads(in_bam: str, regions: List[tuple] = None) -> str:
+    out_bam = os.path.join(TMPDIR, "clipped_reads.bam")
+    if regions is None:
+        command = f"samtools view -u -e 'sclen>0 && mapq>0' {in_bam} > {out_bam}"
+        run_cmd(command, desc="Creating temporary BAM with clipped reads")
+    else:
+        with tempfile.NamedTemporaryFile() as region_file:
+            for chrom,start,end in regions:
+                region_file.write(f"{chrom}\t{start}\t{end}\n")
 
+            command = f"samtools view -u -e 'sclen>0 && mapq>0' -L {region_file.name} {in_bam} > {out_bam}"
+            run_cmd(command, desc="Creating temporary BAM with clipped reads in specified regions")
+    run_cmd(f"samtools index {out_bam}", desc="Indexing temporary BAM with clipped reads")
+    return out_bam
 
 def cli():
 
@@ -367,7 +379,7 @@ def cli():
         "--min-score", type=int, default=15, help="Minimum alignment score for BWA MEM (-T)."
     )
     parser.add_argument(
-        "-c", "--cpus", type=int, default=1, help="Number of CPUs to use."
+        "-@", "--threads", type=int, default=1, help="Number of CPUs to use."
     )
     parser.add_argument(
         "--debug", action="store_true", help="Enable verbose logging."
@@ -411,84 +423,42 @@ def cli():
         regions = []
         for l in open(args.targets_file):
             row = l.strip().split('\t')
-            regions.append(row[0]+":"+row[1]+"-"+row[2])
+            regions.append((row[0], row[1], row[2]))
     elif args.target:
-        regions = [args.target]
+        chrom,tmp = args.target.split(':')
+        start,end = tmp.split('-')
+        regions = [(chrom,start,end)]
     else:
-        regions = []
+        regions = None
 
+    clipped_bam = create_temp_bam_with_clipped_reads(args.bam, regions)
 
-    insertion_positions = set()
+    insertion_positions = set()    
+
+    # Map reads once for all IS elements (whole genome)
+    logging.info("Mapping reads to IS sequences...")
+    is_overlapping_reads_by_is = get_is_overlapping_reads(clipped_bam, args.seq,  cores=args.threads, min_seed_len=args.min_seed, min_aln_score=args.min_score)
     
-    # Process each IS sequence
-    if len(regions)>0:
-        for region in tqdm(regions, desc="Scanning regions"):
-            # Map reads once for all IS elements
-            is_overlapping_reads_by_is = get_is_overlapping_reads(args.bam, args.seq, region, min_seed_len=args.min_seed, min_aln_score=args.min_score, cores=args.cpus)
+    
+    # Process each IS element with its specific reads
+    for is_name in is_names:
+        logging.info(f"Processing {is_name}...")
+        if is_name not in is_overlapping_reads_by_is:
+            logging.info(f"No reads mapped to {is_name}")
+            continue
             
-            # Process each IS element with its specific reads
-            for is_name in is_names:
-                if is_name not in is_overlapping_reads_by_is:
-                    logging.debug(f"No reads mapped to {is_name} in {region}")
-                    continue
-                    
-                is_overlapping_reads = is_overlapping_reads_by_is[is_name]
-                positions = get_most_common_positions(args.bam, region, is_overlapping_reads, min_depth=args.min_depth)
-                logging.debug(f"Positions for {is_name} in {region}: {positions}")
+        is_overlapping_reads = is_overlapping_reads_by_is[is_name]
+        logging.info(f"Found {len(is_overlapping_reads)} reads mapping to {is_name}")
+        positions = get_most_common_positions(clipped_bam, f'{ref_seqname}:1-{ref.get_reference_length(ref_seqname)}', is_overlapping_reads, min_depth=args.min_depth)
+        logging.debug(f"Positions for {is_name}: {positions}")
 
-                if len(positions)>0:
-                    positions = sorted(positions)
-                    start = positions[0]
-                    end = positions[1] if len(positions)==2 else None
-                    
-                    AD = get_AD(args.bam, ref_seqname, start, end)
-                    insertion_positions.add((ref_seqname,start,AD,is_name))
-    else:
-        # Map reads once for all IS elements (whole genome)
-        logging.info("Mapping reads to IS sequences...")
-        is_overlapping_reads_by_is = get_is_overlapping_reads(args.bam, args.seq,  cores=args.cpus, min_seed_len=args.min_seed, min_aln_score=args.min_score)
-        
+        clustered_positions = cluster_positions(positions, min_distance=args.clipping_gap)
+        logging.debug(f"Clustered Positions for {is_name}: {clustered_positions}")
 
-        
-        def get_clustered_positions(positions):
-            clustered = set()
-            for i, (direction, pos) in enumerate(positions):
-                for j, (other_direction, other_pos) in enumerate(positions):
-                    if (
-                        (i != j and abs(pos - other_pos) <= args.clipping_gap)
-                        and (direction != other_direction)
-                    ):
-                        clustered.add(pos)
-                        break
-            clustered = sorted(list(clustered))
-            coordinates = []
-            while len(clustered) > 0:
-                if len(clustered) == 1:
-                    raise ValueError("Unpaired clipping position found.")
-                start = clustered.pop(0)
-                end = clustered.pop(0)
-                coordinates.append((start, end))
-            return sorted(coordinates)
-        
-        # Process each IS element with its specific reads
-        for is_name in is_names:
-            logging.info(f"Processing {is_name}...")
-            if is_name not in is_overlapping_reads_by_is:
-                logging.info(f"No reads mapped to {is_name}")
-                continue
-                
-            is_overlapping_reads = is_overlapping_reads_by_is[is_name]
-            logging.info(f"Found {len(is_overlapping_reads)} reads mapping to {is_name}")
-            positions = get_most_common_positions(args.bam, f'{ref_seqname}:1-{ref.get_reference_length(ref_seqname)}', is_overlapping_reads, min_depth=args.min_depth)
-            logging.debug(f"Positions for {is_name}: {positions}")
-
-
-            clustered_positions = cluster_positions(positions, min_distance=args.clipping_gap)
-            logging.debug(f"Clustered Positions for {is_name}: {clustered_positions}")
-            if len(clustered_positions)>0:
-                for start,end in clustered_positions:      
-                    AD = get_AD(args.bam, ref_seqname, start, end)
-                    insertion_positions.add((ref_seqname,start,AD,is_name))
+        if len(clustered_positions)>0:
+            for start,end in clustered_positions:      
+                AD = get_AD(clipped_bam, ref_seqname, start, end)
+                insertion_positions.add((ref_seqname,start,AD,is_name))
     
     insertion_positions = sorted(insertion_positions, key=lambda x: x[1])
     logging.info(f"Found {len(insertion_positions)} total insertion(s)")
