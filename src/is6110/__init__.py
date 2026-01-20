@@ -2,7 +2,7 @@
 Code to perform IS6110 variant calling
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 
 import argparse
@@ -300,7 +300,10 @@ def get_sample_name(bam_file: str):
     Get the sample name from the BAM file.
     """
     bam = pysam.AlignmentFile(bam_file)
-    sample_name = bam.header['RG'][0]['SM']
+    if 'RG' in bam.header and 'SM' in bam.header['RG'][0]:
+        sample_name = bam.header['RG'][0]['SM']
+    else:
+        sample_name = 'sample'
     return sample_name
 
 
