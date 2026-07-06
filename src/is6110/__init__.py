@@ -116,7 +116,7 @@ def get_overlapping_genes(gff, position):
     """
     Get the genes overlapping with a given position.
     """
-    overlapping_genes = [g for g in gff if g.feature_start <= position <= g.feature_end]
+    overlapping_genes = [g for g in gff if g.feature_start <= position <= g.feature_end if len(g.transcripts)>0]
     return overlapping_genes
 
 
@@ -136,6 +136,8 @@ def get_annotation(gff: list, var: pysam.VariantRecord, me_name:str):
     genes = get_overlapping_genes(gff, var.start)
 
     for gene in genes:
+        if len(gene.transcripts[0].exons) == 0:
+            continue
         gene_positions = get_gene_position(gene, var.start)
         for transcript,pos in gene_positions.items():
             hgvs = get_hgvs(pos, me_name)
