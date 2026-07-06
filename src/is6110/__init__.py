@@ -2,7 +2,7 @@
 Code to perform IS6110 variant calling
 """
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 
 import argparse
