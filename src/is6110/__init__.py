@@ -2,7 +2,7 @@
 Code to perform IS6110 variant calling
 """
 
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 
 
 import argparse
@@ -141,7 +141,7 @@ def get_annotation(gff: list, var: pysam.VariantRecord, me_name:str):
         gene_positions = get_gene_position(gene, var.start)
         for transcript,pos in gene_positions.items():
             hgvs = get_hgvs(pos, me_name)
-            ann = f'{var.alts[0]}|transcript_ablation|HIGH|{gene.gene_id}|{gene.name}|transcript|{transcript}|protein_coding|1/1|{hgvs}||||||'
+            ann = f'{var.alts[0]}|transcript_ablation|HIGH|{gene.name}|{gene.gene_id}|transcript|{transcript}|protein_coding|1/1|{hgvs}||||||'
             anns.append(ann)
     
     return anns
